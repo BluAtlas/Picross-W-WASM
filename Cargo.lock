@@ -2301,16 +2301,17 @@ dependencies = [
 [[package]]
 name = "picross_handler"
 version = "0.1.0"
-source = "git+https://github.com/BluAtlas/picross_handler#6e82d453af6d052e96e65cc87f2e0af3b68e438c"
+source = "git+https://github.com/BluAtlas/picross_handler#b0149d27342a37ef863dc653bc529803617daecf"
 
 [[package]]
 name = "picross_w"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bevy",
  "crossbeam-channel",
  "picross_handler",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

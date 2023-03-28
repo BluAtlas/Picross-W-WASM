@@ -10,7 +10,10 @@ use bevy::{
 use picross_handler::{Cell, Puzzle};
 use wasm_bindgen::prelude::*;
 
-use crate::{GameTextures, NewBoardEvent, RedrawEvent, WinSize, SPRITE_SCALE, TILE_SIZE};
+use crate::{
+    BoardUpdateEvent, GameTextures, NewBoardEvent, WASMSendChannel, WinSize, SPRITE_SCALE,
+    TILE_SIZE,
+};
 
 // endregion
 
@@ -31,6 +34,12 @@ pub struct Tile {
 
 #[derive(Component)]
 pub struct Clue {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Component)]
+pub struct ControlTile {
     pub x: f32,
     pub y: f32,
 }
@@ -86,6 +95,12 @@ pub struct InputEvent {
     pub x: f32,
     pub y: f32,
     pub action: BoardAction,
+    pub from_player: bool,
+}
+
+struct RedrawEvent {
+    width: f32,
+    height: f32,
 }
 
 // endregion
@@ -98,12 +113,15 @@ impl Plugin for BoardPlugin {
             .add_event::<DeleteTilesEvent>()
             .add_event::<DeletedTilesEvent>()
             .add_event::<InputEvent>()
+            .add_event::<RedrawEvent>()
             .add_startup_system_to_stage(StartupStage::PostStartup, startup_system)
             .add_system(spawn_tiles_event_system)
             .add_system(delete_tiles_event_system)
             .add_system(input_event_system)
             .add_system(redraw_event_system)
-            .add_system(new_board_event_system);
+            .add_system(input_and_resizing_system)
+            .add_system(new_board_event_system)
+            .add_system(board_update_event_system);
     }
 }
 
@@ -189,6 +207,7 @@ fn delete_tiles_event_system(
     mut commands: Commands,
     mut tile_query: Query<Entity, With<Tile>>,
     mut clue_query: Query<Entity, With<Clue>>,
+    mut control_tile_query: Query<Entity, With<ControlTile>>,
     mut delete_tiles_event_reader: EventReader<DeleteTilesEvent>,
     mut deleted_tiles_event_writer: EventWriter<DeletedTilesEvent>,
 ) {
@@ -201,6 +220,10 @@ fn delete_tiles_event_system(
             commands.entity(entity).despawn();
         }
 
+        for entity in control_tile_query.iter_mut() {
+            commands.entity(entity).despawn();
+        }
+
         deleted_tiles_event_writer.send(DeletedTilesEvent);
     }
 }
@@ -210,8 +233,55 @@ fn spawn_tiles_event_system(
     game_textures: Res<GameTextures>,
     mut spawn_tiles_event_reader: EventReader<SpawnTilesEvent>,
     board: Res<Board>,
+    current_action: Res<CurrentAction>,
 ) {
     for _ in spawn_tiles_event_reader.iter() {
+        let control_tile_max_size;
+        if (board.p.get_longest_column_clue_len() < board.p.get_longest_row_clue_len()) {
+            control_tile_max_size = board.p.get_longest_column_clue_len();
+        } else {
+            control_tile_max_size = board.p.get_longest_row_clue_len();
+        }
+        // spawn ControlTile sprite
+        commands
+            .spawn(SpriteBundle {
+                texture: match current_action.0 {
+                    BoardAction::Fill => game_textures.tile_filled.clone(),
+                    BoardAction::Cross => game_textures.tile_crossed.clone(),
+                    BoardAction::Empty => game_textures.tile_empty.clone(),
+                },
+                sprite: Sprite {
+                    anchor: Anchor::Center,
+                    ..Default::default()
+                },
+                transform: Transform {
+                    translation: Vec3::new(
+                        board.origin.0
+                            + board.p.get_longest_row_clue_len() as f32 * board.pixels_per_tile
+                                / 2.,
+                        board.origin.1
+                            + board.p.get_height() as f32 * board.pixels_per_tile
+                            + board.p.get_longest_column_clue_len() as f32 * board.pixels_per_tile
+                                / 2.,
+                        TILE_Z,
+                    ),
+                    scale: Vec3::new(
+                        board.tile_scale * control_tile_max_size as f32 * 0.8,
+                        board.tile_scale * control_tile_max_size as f32 * 0.8,
+                        1.,
+                    ),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .insert(ControlTile {
+                x: board.origin.0
+                    + board.p.get_longest_row_clue_len() as f32 * board.pixels_per_tile / 2.,
+                y: board.origin.1
+                    + board.p.get_height() as f32 * board.pixels_per_tile
+                    + board.p.get_longest_column_clue_len() as f32 * board.pixels_per_tile / 2.,
+            });
+
         // create tiles
         for x in (0..board.w as usize) {
             for y in (0..board.h as usize) {
@@ -293,7 +363,7 @@ fn spawn_tiles_event_system(
                 // spawn tile sprite
                 commands
                     .spawn(SpriteBundle {
-                        texture: texture,
+                        texture,
                         sprite: Sprite {
                             anchor: Anchor::BottomLeft,
                             ..Default::default()
@@ -319,41 +389,192 @@ fn spawn_tiles_event_system(
     }
 }
 
-fn input_event_system(
+fn input_and_resizing_system(
+    buttons: Res<Input<MouseButton>>,
+    touches: Res<Touches>,
+    board: Res<Board>,
     game_textures: Res<GameTextures>,
-    mut board: ResMut<Board>,
-    mut input_event_reader: EventReader<InputEvent>,
+    mut current_action: ResMut<CurrentAction>,
+    mut windows: ResMut<Windows>,
+    mut input_event_writer: EventWriter<InputEvent>,
+    mut redraw_event_writer: EventWriter<RedrawEvent>,
+    mut touch_event_reader: EventReader<TouchInput>,
     mut tile_query: Query<(&mut Handle<Image>, &Tile)>,
     mut clue_query: Query<(&mut Text, &Clue)>,
 ) {
-    for event in input_event_reader.iter() {
-        // convert cursor position to tile coordinates
-        let mut pos = Vec2::new(event.x, event.y);
+    let window = windows.get_primary().unwrap();
+
+    // region:      Handle Resizing
+    let canvas_elm = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .get_element_by_id("bevy-canvas")
+        .unwrap();
+    let canvas: web_sys::HtmlCanvasElement = canvas_elm
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| ())
+        .unwrap();
+    let canvas_width: f32 = canvas.client_width() as f32;
+    let canvas_height: f32 = canvas.client_height() as f32;
+    let window = windows.get_primary_mut().unwrap();
+
+    if window.width() != canvas_width || window.height() != canvas_height {
+        info!("size changed");
+        window.update_actual_size_from_backend(canvas_width as u32, canvas_height as u32);
+        redraw_event_writer.send(RedrawEvent {
+            width: canvas_width,
+            height: canvas_height,
+        });
+    }
+    // endregion
+
+    // region:      Handle Input
+    if let Some(screen_pos) = window.cursor_position() {
+        // convert screen coordinates to board coordinates
+        let mut pos = Vec2::new(screen_pos.x, screen_pos.y);
         pos = pos - Vec2::new(board.origin.0, board.origin.1);
         pos = pos / board.pixels_per_tile;
         let x = pos.x.floor();
         let y = pos.y.floor();
 
-        if x < board.p.get_longest_row_clue_len() as f32 && y >= board.h as f32 {
-            // TODO switch between cross and fill modes here in the future
+        // region: Mouse Input
+
+        if buttons.just_pressed(MouseButton::Left) {
+            current_action.0 = BoardAction::Fill;
+        } else if buttons.just_pressed(MouseButton::Right) {
+            current_action.0 = BoardAction::Cross;
+        } else if buttons.just_pressed(MouseButton::Middle) {
+            current_action.0 = BoardAction::Empty;
+        }
+
+        // account for cases where the action already matches the current state of object under cursor
+        if buttons.any_just_pressed([MouseButton::Left, MouseButton::Right]) {
+            if x < board.p.get_longest_row_clue_len() as f32 && y >= board.h as f32 {
+                // mode switch button clicked, do nothing
+            } else if x < board.p.get_longest_row_clue_len() as f32
+                || y >= board.p.get_height() as f32
+            {
+                // account for clues matching action here
+                let red = Color::RED;
+                let gray = Color::GRAY;
+                for (mut text, clue) in clue_query.iter_mut() {
+                    if clue.x == x && clue.y == y {
+                        match (current_action.0) {
+                            (BoardAction::Fill) => {
+                                if text.sections[0].style.color == Color::RED {
+                                    current_action.0 = BoardAction::Empty;
+                                }
+                            }
+                            (BoardAction::Cross) => {
+                                if text.sections[0].style.color == Color::GRAY {
+                                    current_action.0 = BoardAction::Empty;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            } else {
+                // account for tiles matching action here
+                for (mut texture, tile) in tile_query.iter_mut() {
+                    if tile.x == x && tile.y == y {
+                        let texture_copy = texture.clone();
+                        let filled = game_textures.tile_filled.clone();
+                        let crossed = game_textures.tile_crossed.clone();
+                        match (current_action.0) {
+                            (BoardAction::Fill) => {
+                                if texture_copy == filled {
+                                    current_action.0 = BoardAction::Empty;
+                                }
+                            }
+                            (BoardAction::Cross) => {
+                                if texture_copy == crossed {
+                                    current_action.0 = BoardAction::Empty;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        if buttons.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle])
+            && !(x < board.p.get_longest_row_clue_len() as f32 && y >= board.p.get_height() as f32)
+        // && not in control tile
+        {
+            input_event_writer.send(InputEvent {
+                x,
+                y,
+                action: current_action.0,
+                from_player: true,
+            });
+        }
+
+        // endregion
+
+        for touch_event in touch_event_reader.iter() {
+            match touch_event.phase {
+                TouchPhase::Started => input_event_writer.send(InputEvent {
+                    x,
+                    y,
+                    action: current_action.0,
+                    from_player: true,
+                }),
+                TouchPhase::Moved => {
+                    // if to prevent flashing control tile
+                    if !(x < board.p.get_longest_row_clue_len() as f32
+                        && y >= board.p.get_height() as f32)
+                    {
+                        input_event_writer.send(InputEvent {
+                            x,
+                            y,
+                            action: current_action.0,
+                            from_player: true,
+                        })
+                    }
+                }
+                TouchPhase::Ended => {}
+                TouchPhase::Cancelled => {}
+            }
+        }
+    }
+    // endregion
+}
+
+fn input_event_system(
+    game_textures: Res<GameTextures>,
+    send_channel: Res<WASMSendChannel>,
+    mut board: ResMut<Board>,
+    mut input_event_reader: EventReader<InputEvent>,
+    mut tile_query: Query<(&mut Handle<Image>, &Tile), Without<ControlTile>>,
+    mut clue_query: Query<(&mut Text, &Clue)>,
+    mut control_tile_query: Query<(&mut Handle<Image>), (With<ControlTile>, Without<Tile>)>,
+    mut current_action: ResMut<CurrentAction>,
+) {
+    for event in input_event_reader.iter() {
+        // convert cursor position to tile coordinates
+
+        let x = event.x;
+        let y = event.y;
+
+        if x < board.p.get_longest_row_clue_len() as f32 && y >= board.p.get_height() as f32 {
+            // switch between cross and fill modes here for touch
+            current_action.0 = match current_action.0 {
+                BoardAction::Fill => BoardAction::Cross,
+                BoardAction::Cross => BoardAction::Empty,
+                BoardAction::Empty => BoardAction::Fill,
+            };
         } else if x < board.p.get_longest_row_clue_len() as f32 || y >= board.p.get_height() as f32
         {
             for (mut text, clue) in clue_query.iter_mut() {
                 if clue.x == x && clue.y == y {
                     match event.action {
                         BoardAction::Fill => {
-                            if text.sections[0].style.color == Color::RED {
-                                text.sections[0].style.color = Color::BLACK;
-                            } else {
-                                text.sections[0].style.color = Color::RED;
-                            }
+                            text.sections[0].style.color = Color::RED;
                         }
                         BoardAction::Cross => {
-                            if text.sections[0].style.color == Color::GRAY {
-                                text.sections[0].style.color = Color::BLACK;
-                            } else {
-                                text.sections[0].style.color = Color::GRAY;
-                            }
+                            text.sections[0].style.color = Color::GRAY;
                         }
                         BoardAction::Empty => {
                             text.sections[0].style.color = Color::BLACK;
@@ -364,34 +585,54 @@ fn input_event_system(
         } else {
             for (mut texture, tile) in tile_query.iter_mut() {
                 if tile.x == x && tile.y == y {
-                    let texture_copy = texture.clone();
                     // closure to set board and texture easier
                     let mut set_cell = |x: f32, y: f32, cell: Cell, t: Handle<Image>| {
                         let x_diff = board.p.get_longest_row_clue_len();
-                        *texture = t;
-                        board.p.set_cell(x as usize - x_diff, y as usize, cell)
+                        let current_cell = board.p.get_cell(x as usize - x_diff, y as usize);
+                        // update and send changes if cell is different, otherwise do nothing
+                        if current_cell != cell {
+                            *texture = t;
+                            board.p.set_cell(x as usize - x_diff, y as usize, cell);
+                            if event.from_player {
+                                let cell_str;
+                                match cell {
+                                    Cell::Empty => cell_str = String::from("0"),
+                                    Cell::Filled => cell_str = String::from("1"),
+                                    Cell::Crossed => cell_str = String::from("X"),
+                                }
+                                // send update to server if the player made the action
+                                send_channel.tx.send((
+                                    String::from("c"),
+                                    format!(
+                                        "{},{}",
+                                        board.p.get_pos(x as usize - x_diff, y as usize),
+                                        cell_str
+                                    ),
+                                ));
+                            }
+                        }
                     };
 
                     match event.action {
                         BoardAction::Fill => {
-                            if texture_copy == game_textures.tile_filled {
-                                set_cell(x, y, Cell::Empty, game_textures.tile_empty.clone());
-                            } else {
-                                set_cell(x, y, Cell::Filled, game_textures.tile_filled.clone());
-                            }
+                            set_cell(x, y, Cell::Filled, game_textures.tile_filled.clone());
                         }
                         BoardAction::Cross => {
-                            if texture_copy == game_textures.tile_crossed {
-                                set_cell(x, y, Cell::Empty, game_textures.tile_empty.clone());
-                            } else {
-                                set_cell(x, y, Cell::Crossed, game_textures.tile_crossed.clone());
-                            }
+                            set_cell(x, y, Cell::Crossed, game_textures.tile_crossed.clone());
                         }
                         BoardAction::Empty => {
                             set_cell(x, y, Cell::Empty, game_textures.tile_empty.clone());
                         }
                     }
                 }
+            }
+        }
+        // update control tile
+        for (mut texture) in control_tile_query.iter_mut() {
+            match current_action.0 {
+                BoardAction::Fill => *texture = game_textures.tile_filled.clone(),
+                BoardAction::Cross => *texture = game_textures.tile_crossed.clone(),
+                BoardAction::Empty => *texture = game_textures.tile_empty.clone(),
             }
         }
     }
@@ -404,13 +645,70 @@ fn new_board_event_system(
     mut new_board_event_reader: EventReader<NewBoardEvent>,
 ) {
     for event in new_board_event_reader.iter() {
-        if let Ok(new_p) = Puzzle::from_string(event.0.as_str()) {
-            board.p = new_p;
-            resize_board_struct(board.as_mut(), win_size.as_ref());
-            redraw_event_writer.send(RedrawEvent {
-                width: win_size.w,
-                height: win_size.h,
-            })
+        info!("{}", event.clues);
+        match Puzzle::from_string(event.clues.as_str()) {
+            Ok(mut new_p) => {
+                new_p.set_board_from_string(event.cells.as_str());
+
+                board.p = new_p;
+                resize_board_struct(board.as_mut(), win_size.as_ref());
+                redraw_event_writer.send(RedrawEvent {
+                    width: win_size.w,
+                    height: win_size.h,
+                })
+            }
+            Err(err) => warn!(err),
+        }
+    }
+}
+
+fn board_update_event_system(
+    board: Res<Board>,
+    mut input_event_writer: EventWriter<InputEvent>,
+    mut board_update_event_reader: EventReader<BoardUpdateEvent>,
+) {
+    for event in board_update_event_reader.iter() {
+        let cells = &event.0;
+        let mut cells_iter = cells.chars().into_iter();
+
+        if (board.p.get_width() * board.p.get_height() == cells.chars().count()) {
+            for y in 0..board.p.get_height() {
+                for x in 0..board.p.get_width() {
+                    let cell = cells_iter.next();
+                    let mut input_event = InputEvent {
+                        x: (x + board.p.get_longest_row_clue_len()) as f32,
+                        y: y as f32,
+                        action: BoardAction::Empty,
+                        from_player: false,
+                    };
+                    match cell {
+                        Some('0') => {
+                            input_event.action = BoardAction::Empty;
+                            input_event_writer.send(input_event);
+                        }
+                        Some('1') => {
+                            input_event.action = BoardAction::Fill;
+                            input_event_writer.send(input_event);
+                        }
+                        Some('X') => {
+                            input_event.action = BoardAction::Cross;
+                            input_event_writer.send(input_event);
+                        }
+                        Some(c) => {
+                            warn!("Invalid BoardUpdateEvent, Incorrect Cell: {}", c)
+                        }
+                        None => {
+                            warn!("Invalid BoardUpdateEvent, Ran out of input") // should never happen
+                        }
+                    }
+                }
+            }
+        } else {
+            warn!(
+                "Invalid BoardUpdateEvent, Incorrect size: {}, Expected: {}",
+                cells.chars().count(),
+                board.p.get_width() * board.p.get_height()
+            )
         }
     }
 }
