@@ -4,7 +4,9 @@ The web-assembly portion of [Picross W](https://github.com/BluAtlas/Picross-W)
 
 ## Building
 
-To build yourself, install [Rust](https://www.rust-lang.org/) then `wasm32-unknown-unknown` with the following command:
+To build yourself, install [Rust](https://www.rust-lang.org/).
+
+Next install `wasm32-unknown-unknown` with the following command:
 
 ```sh
 rustup target add wasm32-unknown-unknown
