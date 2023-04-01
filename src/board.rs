@@ -70,6 +70,9 @@ pub enum BoardAction {
 #[derive(Resource)]
 pub struct CurrentAction(pub BoardAction);
 
+#[derive(Resource)]
+pub struct ControlAction(pub BoardAction);
+
 impl Default for Board {
     fn default() -> Self {
         Self {
@@ -138,8 +141,9 @@ fn startup_system(
     resize_board_struct(&mut board, win_size.as_ref());
     commands.insert_resource(board);
 
-    let current_action = CurrentAction(BoardAction::Fill);
-    commands.insert_resource(current_action);
+    commands.insert_resource(CurrentAction(BoardAction::Fill));
+
+    commands.insert_resource(ControlAction(BoardAction::Fill));
 
     spawn_tiles_event_writer.send(SpawnTilesEvent);
 }
@@ -233,7 +237,7 @@ fn spawn_tiles_event_system(
     game_textures: Res<GameTextures>,
     mut spawn_tiles_event_reader: EventReader<SpawnTilesEvent>,
     board: Res<Board>,
-    current_action: Res<CurrentAction>,
+    control_action: Res<ControlAction>,
 ) {
     for _ in spawn_tiles_event_reader.iter() {
         let control_tile_max_size;
@@ -245,7 +249,7 @@ fn spawn_tiles_event_system(
         // spawn ControlTile sprite
         commands
             .spawn(SpriteBundle {
-                texture: match current_action.0 {
+                texture: match control_action.0 {
                     BoardAction::Fill => game_textures.tile_filled.clone(),
                     BoardAction::Cross => game_textures.tile_crossed.clone(),
                     BoardAction::Empty => game_textures.tile_empty.clone(),
@@ -395,10 +399,10 @@ fn input_and_resizing_system(
     board: Res<Board>,
     game_textures: Res<GameTextures>,
     mut current_action: ResMut<CurrentAction>,
+    mut control_action: ResMut<ControlAction>,
     mut windows: ResMut<Windows>,
     mut input_event_writer: EventWriter<InputEvent>,
     mut redraw_event_writer: EventWriter<RedrawEvent>,
-    mut touch_event_reader: EventReader<TouchInput>,
     mut tile_query: Query<(&mut Handle<Image>, &Tile)>,
     mut clue_query: Query<(&mut Text, &Clue)>,
 ) {
@@ -441,7 +445,7 @@ fn input_and_resizing_system(
         // region: Mouse Input
 
         if buttons.just_pressed(MouseButton::Left) {
-            current_action.0 = BoardAction::Fill;
+            current_action.0 = control_action.0;
         } else if buttons.just_pressed(MouseButton::Right) {
             current_action.0 = BoardAction::Cross;
         } else if buttons.just_pressed(MouseButton::Middle) {
@@ -450,8 +454,13 @@ fn input_and_resizing_system(
 
         // account for cases where the action already matches the current state of object under cursor
         if buttons.any_just_pressed([MouseButton::Left, MouseButton::Right]) {
-            if x < board.p.get_longest_row_clue_len() as f32 && y >= board.h as f32 {
-                // mode switch button clicked, do nothing
+            if x < board.p.get_longest_row_clue_len() as f32 && y >= board.p.get_height() as f32 {
+                input_event_writer.send(InputEvent {
+                    x,
+                    y,
+                    action: current_action.0,
+                    from_player: true,
+                });
             } else if x < board.p.get_longest_row_clue_len() as f32
                 || y >= board.p.get_height() as f32
             {
@@ -512,32 +521,6 @@ fn input_and_resizing_system(
         }
 
         // endregion
-
-        for touch_event in touch_event_reader.iter() {
-            match touch_event.phase {
-                TouchPhase::Started => input_event_writer.send(InputEvent {
-                    x,
-                    y,
-                    action: current_action.0,
-                    from_player: true,
-                }),
-                TouchPhase::Moved => {
-                    // if to prevent flashing control tile
-                    if !(x < board.p.get_longest_row_clue_len() as f32
-                        && y >= board.p.get_height() as f32)
-                    {
-                        input_event_writer.send(InputEvent {
-                            x,
-                            y,
-                            action: current_action.0,
-                            from_player: true,
-                        })
-                    }
-                }
-                TouchPhase::Ended => {}
-                TouchPhase::Cancelled => {}
-            }
-        }
     }
     // endregion
 }
@@ -551,6 +534,7 @@ fn input_event_system(
     mut clue_query: Query<(&mut Text, &Clue)>,
     mut control_tile_query: Query<(&mut Handle<Image>), (With<ControlTile>, Without<Tile>)>,
     mut current_action: ResMut<CurrentAction>,
+    mut control_action: ResMut<ControlAction>,
 ) {
     for event in input_event_reader.iter() {
         // convert cursor position to tile coordinates
@@ -560,12 +544,13 @@ fn input_event_system(
 
         if x < board.p.get_longest_row_clue_len() as f32 && y >= board.p.get_height() as f32 {
             // switch between cross and fill modes here for touch
-            current_action.0 = match current_action.0 {
+            control_action.0 = match control_action.0 {
                 BoardAction::Fill => BoardAction::Cross,
-                BoardAction::Cross => BoardAction::Empty,
+                BoardAction::Cross => BoardAction::Fill,
                 BoardAction::Empty => BoardAction::Fill,
             };
         } else if x < board.p.get_longest_row_clue_len() as f32 || y >= board.p.get_height() as f32
+        // handle clues
         {
             for (mut text, clue) in clue_query.iter_mut() {
                 if clue.x == x && clue.y == y {
@@ -583,6 +568,7 @@ fn input_event_system(
                 }
             }
         } else {
+            // handle tiles
             for (mut texture, tile) in tile_query.iter_mut() {
                 if tile.x == x && tile.y == y {
                     // closure to set board and texture easier
@@ -629,7 +615,7 @@ fn input_event_system(
         }
         // update control tile
         for (mut texture) in control_tile_query.iter_mut() {
-            match current_action.0 {
+            match control_action.0 {
                 BoardAction::Fill => *texture = game_textures.tile_filled.clone(),
                 BoardAction::Cross => *texture = game_textures.tile_crossed.clone(),
                 BoardAction::Empty => *texture = game_textures.tile_empty.clone(),
