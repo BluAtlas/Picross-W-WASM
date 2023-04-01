@@ -645,7 +645,6 @@ fn new_board_event_system(
     mut new_board_event_reader: EventReader<NewBoardEvent>,
 ) {
     for event in new_board_event_reader.iter() {
-        info!("{}", event.clues);
         match Puzzle::from_string(event.clues.as_str()) {
             Ok(mut new_p) => {
                 new_p.set_board_from_string(event.cells.as_str());

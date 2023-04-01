@@ -162,7 +162,6 @@ fn receive_channel_system(
         match command {
             // joined room, new board and cells
             "j" => {
-                info!(data);
                 let mut data_iter = data.split("SPLIT");
                 let mut clues = String::from("");
                 let mut cells = String::from("");
