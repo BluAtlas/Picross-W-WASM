@@ -2,6 +2,8 @@
 
 The web-assembly portion of [Picross W](https://github.com/BluAtlas/Picross-W)
 
+Pre-built binaries located in the `./out` directory.
+
 ## Building
 
 To build yourself, install [Rust](https://www.rust-lang.org/).

@@ -73,8 +73,9 @@ struct BoardUpdateEvent(String);
 
 fn main() {
     // get size of canvas object in HTML
-    let canvas_elm = web_sys::window()
-        .unwrap()
+    let window_elm = web_sys::window().unwrap();
+    let device_pixel_ratio = window_elm.device_pixel_ratio() as f32;
+    let canvas_elm = window_elm
         .document()
         .unwrap()
         .get_element_by_id("bevy-canvas")
@@ -83,8 +84,14 @@ fn main() {
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .map_err(|_| ())
         .unwrap();
-    let canvas_width: f32 = canvas.client_width() as f32;
-    let canvas_height: f32 = canvas.client_height() as f32;
+    let mut canvas_width: f32 = canvas.client_width() as f32;
+    let mut canvas_height: f32 = canvas.client_height() as f32;
+    if canvas_width * device_pixel_ratio > 4096. {
+        canvas_width = (4096. / device_pixel_ratio);
+    }
+    if canvas_height * device_pixel_ratio > 4096. {
+        canvas_height = (4096. / device_pixel_ratio);
+    }
 
     // construct global sender
     let (tx, rx) = unbounded();

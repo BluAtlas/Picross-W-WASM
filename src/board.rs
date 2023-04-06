@@ -409,8 +409,9 @@ fn input_and_resizing_system(
     let window = windows.get_primary().unwrap();
 
     // region:      Handle Resizing
-    let canvas_elm = web_sys::window()
-        .unwrap()
+    let window_elm = web_sys::window().unwrap();
+    let device_pixel_ratio = window_elm.device_pixel_ratio() as f32;
+    let canvas_elm = window_elm
         .document()
         .unwrap()
         .get_element_by_id("bevy-canvas")
@@ -419,16 +420,42 @@ fn input_and_resizing_system(
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .map_err(|_| ())
         .unwrap();
-    let canvas_width: f32 = canvas.client_width() as f32;
-    let canvas_height: f32 = canvas.client_height() as f32;
-    let window = windows.get_primary_mut().unwrap();
+    let mut canvas_width: f32 = (canvas.client_width() as f32 * device_pixel_ratio).round();
+    let mut canvas_height: f32 = (canvas.client_height() as f32 * device_pixel_ratio).round();
 
-    if window.width() != canvas_width || window.height() != canvas_height {
-        info!("size changed");
+    // both cap at 4096
+    if canvas_width > 4096. {
+        canvas_width = 4096.;
+    }
+    if canvas_height > 4096. {
+        canvas_height = 4096.;
+    }
+
+    let window = windows.get_primary_mut().unwrap();
+    let mut window_width = ((window.width() * device_pixel_ratio).round()); //* device_pixel_ratio).round();
+    let mut window_height = ((window.height() * device_pixel_ratio).round()); //* device_pixel_ratio).round();
+    if window_width > 4096. {
+        window_width = 4096.;
+    }
+    if window_height > 4096. {
+        window_height = 4096.;
+    }
+
+    if window_width != canvas_width || window_height != canvas_height {
+        info!(
+            "size changed from {} {} ({} {}) to : {} {}",
+            window.width(),
+            window.height(),
+            window_width,
+            window_height,
+            canvas_width,
+            canvas_height
+        );
         window.update_actual_size_from_backend(canvas_width as u32, canvas_height as u32);
+        // bevy will automatically convert the given width and height down using device_pixel_ratio, so use the actual canvas height and width for game logic
         redraw_event_writer.send(RedrawEvent {
-            width: canvas_width,
-            height: canvas_height,
+            width: canvas.client_width() as f32,
+            height: canvas.client_height() as f32,
         });
     }
     // endregion
